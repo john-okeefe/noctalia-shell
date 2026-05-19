@@ -1,5 +1,8 @@
 # Noctalia Shell
 
+> [!IMPORTANT]
+> We are actively working on **[Noctalia v5](https://noctalia.dev/blog/announcing-noctalia-v5)** — a full rewrite that will be entering alpha soon. As a result, issues and pull requests targeting v4 will most likely not be merged or fixed. Thank you for your patience and support!
+
 **_quiet by design_**
 
 <p align="center">
@@ -37,7 +40,7 @@
 
 ## What is Noctalia?
 
-A beautiful, minimal desktop shell for Wayland that actually gets out of your way. Built on [Quickshell](https://quickshell.outfoxxed.me/) (Qt/QML) with a warm lavender aesthetic that you can easily customize to match your vibe.
+A beautiful, minimal desktop shell for Wayland that actually gets out of your way. Built on [Quickshell](https://quickshell.org/) (Qt/QML) with a warm lavender aesthetic that you can easily customize to match your vibe.
 
 **✨ Key Features:**
 - 🪟 Native support for Niri, Hyprland, Sway, Scroll, Labwc and MangoWC
