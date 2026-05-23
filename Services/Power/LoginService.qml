@@ -4,25 +4,22 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
-import qs.Services.Compositor
 import qs.Services.UI
 
 Singleton {
   id: root
 
-  readonly property bool available: _probed && _logindFound && _dbusMonitorFound
-  readonly property bool active: _active
-  readonly property bool inhibitorActive: _inhibitProcess !== null
+  readonly property bool available: _probed && _logindFound && _dbusMonitorFound && _inhibitBinary !== ""
 
   property bool _probed: false
   property bool _logindFound: false
   property bool _dbusMonitorFound: false
+  property string _inhibitBinary: ""
   property bool _active: false
   property var _monitorProcess: null
   property var _inhibitProcess: null
   property int _restartAttempts: 0
   property bool _signalReceived: false
-  property string _inhibitBinary: ""
   property int _lockConfirmCount: 0
 
   readonly property int _maxRestartAttempts: 3
@@ -31,9 +28,11 @@ Singleton {
   signal prepareForSleep(bool sleeping)
 
   function init() {
-    Logger.i("LoginService", "Probing for logind and dbus-monitor...");
+    Logger.i("LoginService", "Probing for logind, dbus-monitor, and inhibit binary...");
     _probeInhibitBinary();
   }
+
+  // --- Probing ---
 
   function _probeInhibitBinary() {
     var proc = Qt.createQmlObject("
@@ -57,13 +56,11 @@ Singleton {
   }
 
   function _onInhibitBinaryProbe(path) {
-    if (path.length > 0) {
-      _inhibitBinary = path;
-      Logger.i("LoginService", "Inhibit binary found: " + path);
-    } else {
-      _inhibitBinary = "";
-      Logger.w("LoginService", "No inhibit binary found (elogind-inhibit / systemd-inhibit)");
-    }
+    _inhibitBinary = path;
+    if (path.length > 0)
+      Logger.i("LoginService", "Inhibit binary: " + path);
+    else
+      Logger.w("LoginService", "No inhibit binary found");
     _probeLogind();
   }
 
@@ -95,7 +92,6 @@ Singleton {
       Logger.i("LoginService", "logind found on system bus");
     else
       Logger.w("LoginService", "logind not available on system bus");
-
     _probeDbusMonitor();
   }
 
@@ -124,30 +120,27 @@ Singleton {
     _dbusMonitorFound = exitCode === 0;
     _probed = true;
 
-    if (_dbusMonitorFound) {
+    if (_dbusMonitorFound)
       Logger.i("LoginService", "dbus-monitor available");
-    } else {
+    else
       Logger.w("LoginService", "dbus-monitor not found");
-    }
 
     if (available) {
-      Logger.i("LoginService", "All dependencies met, starting monitor and delay inhibitor");
+      Logger.i("LoginService", "All dependencies met, starting monitor");
       _startMonitor();
-      _startInhibitor();
     } else {
-      Logger.i("LoginService", "logind/dbus-monitor not available — using Time.resumed fallback only");
+      Logger.i("LoginService", "Dependencies not met — using Time.resumed fallback only");
     }
   }
 
+  // --- Delay inhibitor ---
+  // Holds the suspend until the lockscreen is confirmed active.
+  // This is the same approach hypridle uses: take a delay lock, wait for
+  // the lockscreen to render, then release the lock to let suspend proceed.
+
   function _startInhibitor() {
-    if (_inhibitBinary.length === 0) {
-      Logger.w("LoginService", "Cannot start delay inhibitor — no inhibit binary");
+    if (_inhibitBinary.length === 0 || _inhibitProcess)
       return;
-    }
-    if (_inhibitProcess) {
-      Logger.d("LoginService", "Delay inhibitor already running");
-      return;
-    }
 
     _inhibitProcess = Qt.createQmlObject("
       import QtQuick
@@ -167,18 +160,15 @@ Singleton {
     if (_inhibitProcess) {
       _inhibitProcess.running = true;
       Logger.i("LoginService", "Sleep delay inhibitor active");
-    } else {
-      Logger.e("LoginService", "Failed to create delay inhibitor process");
     }
   }
 
   function _releaseInhibitor() {
     if (_inhibitProcess) {
       _inhibitProcess.signal(15);
-      _inhibitProcess.running = false;
       _inhibitProcess.destroy();
       _inhibitProcess = null;
-      Logger.i("LoginService", "Sleep delay inhibitor released — system may now suspend");
+      Logger.i("LoginService", "Sleep delay inhibitor released");
     }
   }
 
@@ -187,23 +177,13 @@ Singleton {
       _inhibitProcess.destroy();
       _inhibitProcess = null;
     }
-    if (!_suspending) {
-      Logger.w("LoginService", "Delay inhibitor exited unexpectedly (" + exitCode + "), restarting in 5s");
-      inhibitorRestartTimer.start();
-    }
   }
 
-  property bool _suspending: false
+  // --- D-Bus monitor ---
 
   function _startMonitor() {
-    if (!available) {
-      Logger.w("LoginService", "Cannot start monitor — dependencies not met");
+    if (!available || _monitorProcess)
       return;
-    }
-    if (_monitorProcess) {
-      Logger.w("LoginService", "Monitor already running");
-      return;
-    }
 
     _signalReceived = false;
 
@@ -229,10 +209,7 @@ Singleton {
       _monitorProcess.running = true;
       _active = true;
       _restartAttempts = 0;
-      Logger.i("LoginService", "D-Bus monitor started (listening for PrepareForSleep)");
-    } else {
-      Logger.e("LoginService", "Failed to create monitor process");
-      _active = false;
+      Logger.i("LoginService", "D-Bus monitor started");
     }
   }
 
@@ -255,10 +232,11 @@ Singleton {
       return;
     }
 
-    if (_signalBuffer === "pending" && trimmed.length === 0) {
+    if (_signalBuffer === "pending" && trimmed.length === 0)
       _signalBuffer = "";
-    }
   }
+
+  // --- Core suspend/resume logic ---
 
   function _handlePrepareForSleep(sleeping) {
     Logger.i("LoginService", "PrepareForSleep: " + (sleeping ? "suspending" : "resuming"));
@@ -267,30 +245,38 @@ Singleton {
     if (!Settings.data.general.lockOnSuspend)
       return;
 
-    if (PanelService.lockScreen) {
-      if (sleeping) {
-        _suspending = true;
-        if (!PanelService.lockScreen.active) {
-          Logger.i("LoginService", "Locking screen before suspend (inhibitor holding)");
-          PanelService.lockScreen.active = true;
-          _lockConfirmCount = 0;
-          lockConfirmTimer.start();
-        } else {
-          Logger.i("LoginService", "Screen already locked, releasing inhibitor");
-          _releaseInhibitor();
-        }
+    var lockScreen = PanelService.lockScreen;
+    if (!lockScreen)
+      return;
+
+    if (sleeping) {
+      // Take the delay inhibitor BEFORE activating lockscreen.
+      // This holds the kernel from actually suspending.
+      _startInhibitor();
+
+      if (lockScreen.active && lockScreen.item) {
+        // Already locked and loaded, just release inhibitor
+        Logger.i("LoginService", "Screen already locked, releasing inhibitor");
+        _releaseInhibitor();
       } else {
-        _suspending = false;
-        if (!PanelService.lockScreen.active) {
-          Logger.i("LoginService", "Locking screen on resume");
-          PanelService.lockScreen._lockOnResume = true;
-          PanelService.lockScreen.active = true;
-        } else {
-          PanelService.lockScreen.graceAllowed = false;
-          PanelService.lockScreen.lockedAt = 0;
-        }
-        inhibitorRestartTimer.start();
+        // Activate lockscreen, then poll until loaded
+        Logger.i("LoginService", "Locking screen (inhibitor holding suspend)...");
+        lockScreen._lockOnResume = false;
+        lockScreen.active = true;
+        _lockConfirmCount = 0;
+        lockConfirmTimer.start();
       }
+    } else {
+      // Resume: ensure locked, kill grace, restart inhibitor for next cycle
+      if (!lockScreen.active) {
+        Logger.i("LoginService", "Locking screen on resume");
+        lockScreen._lockOnResume = true;
+        lockScreen.active = true;
+      } else {
+        lockScreen.graceAllowed = false;
+        lockScreen.lockedAt = 0;
+      }
+      _startInhibitor();
     }
   }
 
@@ -303,7 +289,8 @@ Singleton {
     onTriggered: {
       root._lockConfirmCount++;
 
-      if (PanelService.lockScreen && PanelService.lockScreen.active && PanelService.lockScreen.item) {
+      var lockScreen = PanelService.lockScreen;
+      if (lockScreen && lockScreen.active && lockScreen.item) {
         Logger.i("LoginService", "Lock screen confirmed active, releasing inhibitor");
         stop();
         root._releaseInhibitor();
@@ -311,22 +298,14 @@ Singleton {
       }
 
       if (root._lockConfirmCount >= root._maxLockConfirmAttempts) {
-        Logger.w("LoginService", "Lock screen not confirmed after 3s, releasing inhibitor anyway");
+        Logger.w("LoginService", "Lock screen not confirmed after 3s, releasing inhibitor");
         stop();
         root._releaseInhibitor();
       }
     }
   }
 
-  Timer {
-    id: inhibitorRestartTimer
-    interval: 5000
-    repeat: false
-    onTriggered: {
-      if (root.available && !root._suspending)
-        root._startInhibitor();
-    }
-  }
+  // --- Monitor lifecycle ---
 
   function _onMonitorExited(exitCode, exitStatus) {
     _active = false;
@@ -335,14 +314,14 @@ Singleton {
     if (!_signalReceived && exitCode !== 0) {
       _restartAttempts++;
       if (_restartAttempts >= _maxRestartAttempts) {
-        Logger.w("LoginService", "Monitor failed " + _restartAttempts + " times without receiving signals — giving up (Time.resumed fallback active)");
+        Logger.w("LoginService", "Monitor failed " + _restartAttempts + " times — giving up (Time.resumed fallback active)");
         return;
       }
     } else {
       _restartAttempts = 0;
     }
 
-    Logger.i("LoginService", "Monitor exited (code " + exitCode + "), restarting in 5s (attempt " + (_restartAttempts + 1) + "/" + _maxRestartAttempts + ")");
+    Logger.i("LoginService", "Monitor exited (code " + exitCode + "), restarting in 5s");
     restartTimer.start();
   }
 
@@ -368,7 +347,6 @@ Singleton {
   Component.onDestruction: {
     restartTimer.stop();
     lockConfirmTimer.stop();
-    inhibitorRestartTimer.stop();
     _releaseInhibitor();
     _cleanupMonitor();
   }

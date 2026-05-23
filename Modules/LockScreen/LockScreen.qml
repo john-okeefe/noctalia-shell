@@ -60,22 +60,6 @@ Loader {
     }
   }
 
-  Connections {
-    target: LoginService
-    function onPrepareForSleep(sleeping) {
-      if (sleeping) {
-        root.graceAllowed = false;
-        root.lockedAt = 0;
-      } else if (Settings.data.general.lockOnSuspend && !root.active) {
-        root._lockOnResume = true;
-        root.active = true;
-      } else if (root.active) {
-        root.graceAllowed = false;
-        root.lockedAt = 0;
-      }
-    }
-  }
-
   onNeedsSpectrumChanged: {
     if (root.needsSpectrum) {
       SpectrumService.registerComponent("lockscreen");
