@@ -109,6 +109,7 @@ ShellRoot {
           NightLightService.apply();
           IdleInhibitorService.init();
           IdleService.init();
+          LoginService.init();
           PowerProfileService.init();
           HostService.init();
           NotificationRulesService.init();
