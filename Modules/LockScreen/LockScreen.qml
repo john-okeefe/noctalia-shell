@@ -43,6 +43,10 @@ Loader {
       Logger.i("LockScreen", "System resumed, killing grace (graceAllowed was " + root.graceAllowed + ", lockedAt was " + root.lockedAt + ")");
       root.graceAllowed = false;
       root.lockedAt = 0;
+      if (Settings.data.general.lockOnSuspend && !root.active) {
+        Logger.i("LockScreen", "Lock-on-suspend: activating lock screen on resume fallback");
+        root.active = true;
+      }
     }
   }
 
