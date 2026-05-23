@@ -22,6 +22,7 @@ Singleton {
   property bool _signalReceived: false
   property int _lockConfirmCount: 0
   property bool _inhibitorHolding: false
+  property int _probePhase: 0
 
   readonly property int _maxRestartAttempts: 3
   readonly property int _maxLockConfirmAttempts: 30
@@ -30,118 +31,85 @@ Singleton {
 
   function init() {
     Logger.i("LoginService", "Probing for logind, dbus-monitor, and inhibit binary...");
-    _probeInhibitBinary();
+    _probePhase = 1;
+    inhibitBinaryProbe.running = true;
   }
 
-  // --- Probing ---
+  // --- Probing (static Process blocks) ---
 
-  function _probeInhibitBinary() {
-    var proc = Qt.createQmlObject("
-      import QtQuick
-      import Quickshell.Io
-
-      Process {
-        command: [\"sh\", \"-c\", \"which elogind-inhibit 2>/dev/null || which systemd-inhibit 2>/dev/null || echo ''\"]
-        running: false
-        stdout: StdioCollector {}
-        onExited: function(exitCode) {
-          LoginService._onInhibitBinaryProbe(stdout.text.trim());
-          destroy();
-        }
+  Process {
+    id: inhibitBinaryProbe
+    command: ["sh", "-c", "which elogind-inhibit 2>/dev/null || which systemd-inhibit 2>/dev/null || echo ''"]
+    running: false
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var path = String(text || "").trim();
+        root._inhibitBinary = path;
+        if (path.length > 0)
+          Logger.i("LoginService", "Inhibit binary: " + path);
+        else
+          Logger.w("LoginService", "No inhibit binary found");
+        root._probePhase = 2;
+        logindProbe.running = true;
       }
-    ", root, "InhibitBinaryProbe");
-    if (proc)
-      proc.running = true;
-    else
-      _onInhibitBinaryProbe("");
+    }
   }
 
-  function _onInhibitBinaryProbe(path) {
-    _inhibitBinary = path;
-    if (path.length > 0)
-      Logger.i("LoginService", "Inhibit binary: " + path);
-    else
-      Logger.w("LoginService", "No inhibit binary found");
-    _probeLogind();
-  }
-
-  function _probeLogind() {
-    var proc = Qt.createQmlObject("
-      import QtQuick
-      import Quickshell.Io
-
-      Process {
-        command: [\"dbus-send\", \"--system\", \"--print-reply\", \"--dest=org.freedesktop.login1\",
-                  \"/org/freedesktop/login1\", \"org.freedesktop.DBus.Introspectable.Introspect\"]
-        running: false
-        stdout: StdioCollector {}
-        onExited: function(exitCode) {
-          LoginService._onLogindProbe(exitCode, stdout.text);
-          destroy();
-        }
+  Process {
+    id: logindProbe
+    command: ["dbus-send", "--system", "--print-reply", "--dest=org.freedesktop.login1",
+              "/org/freedesktop/login1", "org.freedesktop.DBus.Introspectable.Introspect"]
+    running: false
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var output = String(text || "");
+        root._logindFound = output.length > 0;
+        if (root._logindFound)
+          Logger.i("LoginService", "logind found on system bus");
+        else
+          Logger.w("LoginService", "logind not available on system bus");
+        root._probePhase = 3;
+        dbusMonitorProbe.running = true;
       }
-    ", root, "LogindProbe");
-    if (proc)
-      proc.running = true;
-    else
-      _onLogindProbe(1, "");
-  }
-
-  function _onLogindProbe(exitCode, output) {
-    _logindFound = exitCode === 0 && output.length > 0;
-    if (_logindFound)
-      Logger.i("LoginService", "logind found on system bus");
-    else
-      Logger.w("LoginService", "logind not available on system bus");
-    _probeDbusMonitor();
-  }
-
-  function _probeDbusMonitor() {
-    var proc = Qt.createQmlObject("
-      import QtQuick
-      import Quickshell.Io
-
-      Process {
-        command: [\"which\", \"dbus-monitor\"]
-        running: false
-        stdout: StdioCollector {}
-        onExited: function(exitCode) {
-          LoginService._onDbusMonitorProbe(exitCode);
-          destroy();
-        }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root._logindFound = false;
+        Logger.w("LoginService", "logind probe failed (exit " + exitCode + ")");
       }
-    ", root, "DbusMonitorProbe");
-    if (proc)
-      proc.running = true;
-    else
-      _onDbusMonitorProbe(1);
+    }
   }
 
-  function _onDbusMonitorProbe(exitCode) {
-    _dbusMonitorFound = exitCode === 0;
-    _probed = true;
+  Process {
+    id: dbusMonitorProbe
+    command: ["which", "dbus-monitor"]
+    running: false
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var output = String(text || "").trim();
+        root._dbusMonitorFound = output.length > 0;
+      }
+    }
+    onExited: function(exitCode) {
+      root._dbusMonitorFound = exitCode === 0;
+      root._probed = true;
 
-    if (_dbusMonitorFound)
-      Logger.i("LoginService", "dbus-monitor available");
-    else
-      Logger.w("LoginService", "dbus-monitor not found");
+      if (root._dbusMonitorFound)
+        Logger.i("LoginService", "dbus-monitor available");
+      else
+        Logger.w("LoginService", "dbus-monitor not found");
 
-    if (available) {
-      Logger.i("LoginService", "All dependencies met, starting monitor and persistent inhibitor");
-      _startMonitor();
-      _startInhibitor();
-    } else {
-      Logger.i("LoginService", "Dependencies not met — using Time.resumed fallback only");
+      if (root.available) {
+        Logger.i("LoginService", "All dependencies met, starting monitor and persistent inhibitor");
+        root._startMonitor();
+        root._startInhibitor();
+      } else {
+        Logger.i("LoginService", "Dependencies not met — using Time.resumed fallback only");
+      }
     }
   }
 
   // --- Persistent delay inhibitor ---
-  //
-  // Matches hypridle's approach: take the delay lock at startup and hold it
-  // persistently. When PrepareForSleep(true) fires, the inhibitor is ALREADY
-  // active, so logind waits. We activate the lockscreen, poll until confirmed,
-  // then release the inhibitor — suspend proceeds with lockscreen rendering.
-  // On resume, retake the inhibitor for the next cycle.
 
   function _startInhibitor() {
     if (_inhibitBinary.length === 0 || _inhibitProcess)
@@ -152,20 +120,23 @@ Singleton {
       import Quickshell.Io
 
       Process {
-        command: [\"" + _inhibitBinary + "\", \"--what=sleep\", \"--who=noctalia-shell\",
-                  \"--why=Holding suspend until lockscreen is active\", \"--mode=delay\",
-                  \"sleep\", \"infinity\"]
         running: false
         onExited: function(exitCode) {
-          LoginService._onInhibitorExited(exitCode);
+          root._onInhibitorExited(exitCode);
         }
       }
     ", root, "InhibitProcess");
 
-    if (_inhibitProcess) {
-      _inhibitProcess.running = true;
-      Logger.i("LoginService", "Sleep delay inhibitor active (persistent)");
+    if (!_inhibitProcess) {
+      Logger.e("LoginService", "Failed to create inhibitor process object");
+      return;
     }
+
+    _inhibitProcess.command = [_inhibitBinary, "--what=sleep", "--who=noctalia-shell",
+                               "--why=Holding suspend until lockscreen is active", "--mode=delay",
+                               "sleep", "infinity"];
+    _inhibitProcess.running = true;
+    Logger.i("LoginService", "Sleep delay inhibitor active (persistent)");
   }
 
   function _releaseInhibitor() {
@@ -185,10 +156,8 @@ Singleton {
     }
 
     if (_inhibitorHolding) {
-      // Expected — we released it to allow suspend
       _inhibitorHolding = false;
     } else {
-      // Unexpected exit — restart after delay
       Logger.w("LoginService", "Inhibitor exited unexpectedly (" + exitCode + "), restarting in 5s");
       inhibitorRestartTimer.start();
     }
@@ -207,25 +176,28 @@ Singleton {
       import Quickshell.Io
 
       Process {
-        command: [\"dbus-monitor\", \"--system\", \"path='/org/freedesktop/login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'\"]
         running: false
         stdout: SplitParser {
           onRead: function(data) {
-            LoginService._parseLine(data);
+            root._parseLine(data);
           }
         }
         onExited: function(exitCode, exitStatus) {
-          LoginService._onMonitorExited(exitCode, exitStatus);
+          root._onMonitorExited(exitCode, exitStatus);
         }
       }
     ", root, "LoginMonitorProcess");
 
-    if (_monitorProcess) {
-      _monitorProcess.running = true;
-      _active = true;
-      _restartAttempts = 0;
-      Logger.i("LoginService", "D-Bus monitor started");
+    if (!_monitorProcess) {
+      Logger.e("LoginService", "Failed to create monitor process object");
+      return;
     }
+
+    _monitorProcess.command = ["dbus-monitor", "--system", "path='/org/freedesktop/login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"];
+    _monitorProcess.running = true;
+    _active = true;
+    _restartAttempts = 0;
+    Logger.i("LoginService", "D-Bus monitor started");
   }
 
   property string _signalBuffer: ""
@@ -265,8 +237,6 @@ Singleton {
       return;
 
     if (sleeping) {
-      // The persistent inhibitor is already holding the suspend.
-      // Activate lockscreen, then release inhibitor once confirmed.
       _inhibitorHolding = true;
 
       if (lockScreen.active && lockScreen.item) {
@@ -280,7 +250,6 @@ Singleton {
         lockConfirmTimer.start();
       }
     } else {
-      // Resume: ensure locked, kill grace, retake inhibitor for next cycle
       if (!lockScreen.active) {
         Logger.i("LoginService", "Locking screen on resume");
         lockScreen._lockOnResume = true;
