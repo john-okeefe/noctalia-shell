@@ -18,20 +18,29 @@ Loader {
 
   property real lockedAt: 0
   property bool graceAllowed: false
+  property bool _lockOnResume: false
 
   readonly property bool needsSpectrum: root.active && !Settings.data.general.compactLockScreen && Settings.data.audio.visualizerType !== "" && Settings.data.audio.visualizerType !== "none"
 
   onActiveChanged: {
     if (root.active) {
-      root.lockedAt = Date.now();
-      root.graceAllowed = true;
-      Logger.i("LockScreen", "Lock activated, lockedAt=" + root.lockedAt + " gracePeriod=" + Settings.data.general.lockScreenGracePeriod + "s");
+      if (root._lockOnResume) {
+        root.lockedAt = 0;
+        root.graceAllowed = false;
+        root._lockOnResume = false;
+        Logger.i("LockScreen", "Lock activated on resume — grace disabled");
+      } else {
+        root.lockedAt = Date.now();
+        root.graceAllowed = true;
+        Logger.i("LockScreen", "Lock activated, lockedAt=" + root.lockedAt + " gracePeriod=" + Settings.data.general.lockScreenGracePeriod + "s");
+      }
       LockKeysService.registerComponent("lockscreen");
       if (root.needsSpectrum)
         SpectrumService.registerComponent("lockscreen");
     } else {
       root.lockedAt = 0;
       root.graceAllowed = false;
+      root._lockOnResume = false;
       SpectrumService.unregisterComponent("lockscreen");
       LockKeysService.unregisterComponent("lockscreen");
     }
@@ -45,7 +54,24 @@ Loader {
       root.lockedAt = 0;
       if (Settings.data.general.lockOnSuspend && !root.active) {
         Logger.i("LockScreen", "Lock-on-suspend: activating lock screen on resume fallback");
+        root._lockOnResume = true;
         root.active = true;
+      }
+    }
+  }
+
+  Connections {
+    target: LoginService
+    function onPrepareForSleep(sleeping) {
+      if (sleeping) {
+        root.graceAllowed = false;
+        root.lockedAt = 0;
+      } else if (Settings.data.general.lockOnSuspend && !root.active) {
+        root._lockOnResume = true;
+        root.active = true;
+      } else if (root.active) {
+        root.graceAllowed = false;
+        root.lockedAt = 0;
       }
     }
   }

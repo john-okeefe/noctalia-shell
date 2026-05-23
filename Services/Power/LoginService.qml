@@ -170,10 +170,24 @@ Singleton {
     Logger.i("LoginService", "PrepareForSleep: " + (sleeping ? "suspending" : "resuming"));
     prepareForSleep(sleeping);
 
-    if (sleeping && Settings.data.general.lockOnSuspend) {
-      if (PanelService.lockScreen && !PanelService.lockScreen.active) {
-        Logger.i("LoginService", "Locking screen before suspend");
-        PanelService.lockScreen.active = true;
+    if (!Settings.data.general.lockOnSuspend)
+      return;
+
+    if (PanelService.lockScreen) {
+      if (sleeping) {
+        if (!PanelService.lockScreen.active) {
+          Logger.i("LoginService", "Locking screen before suspend");
+          PanelService.lockScreen.active = true;
+        }
+      } else {
+        if (!PanelService.lockScreen.active) {
+          Logger.i("LoginService", "Locking screen on resume");
+          PanelService.lockScreen._lockOnResume = true;
+          PanelService.lockScreen.active = true;
+        } else {
+          PanelService.lockScreen.graceAllowed = false;
+          PanelService.lockScreen.lockedAt = 0;
+        }
       }
     }
   }
