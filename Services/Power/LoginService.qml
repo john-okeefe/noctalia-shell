@@ -21,6 +21,7 @@ Singleton {
   property int _restartAttempts: 0
   property bool _signalReceived: false
   property int _lockConfirmCount: 0
+  property bool _inhibitorHolding: false
 
   readonly property int _maxRestartAttempts: 3
   readonly property int _maxLockConfirmAttempts: 30
@@ -126,17 +127,21 @@ Singleton {
       Logger.w("LoginService", "dbus-monitor not found");
 
     if (available) {
-      Logger.i("LoginService", "All dependencies met, starting monitor");
+      Logger.i("LoginService", "All dependencies met, starting monitor and persistent inhibitor");
       _startMonitor();
+      _startInhibitor();
     } else {
       Logger.i("LoginService", "Dependencies not met — using Time.resumed fallback only");
     }
   }
 
-  // --- Delay inhibitor ---
-  // Holds the suspend until the lockscreen is confirmed active.
-  // This is the same approach hypridle uses: take a delay lock, wait for
-  // the lockscreen to render, then release the lock to let suspend proceed.
+  // --- Persistent delay inhibitor ---
+  //
+  // Matches hypridle's approach: take the delay lock at startup and hold it
+  // persistently. When PrepareForSleep(true) fires, the inhibitor is ALREADY
+  // active, so logind waits. We activate the lockscreen, poll until confirmed,
+  // then release the inhibitor — suspend proceeds with lockscreen rendering.
+  // On resume, retake the inhibitor for the next cycle.
 
   function _startInhibitor() {
     if (_inhibitBinary.length === 0 || _inhibitProcess)
@@ -159,7 +164,7 @@ Singleton {
 
     if (_inhibitProcess) {
       _inhibitProcess.running = true;
-      Logger.i("LoginService", "Sleep delay inhibitor active");
+      Logger.i("LoginService", "Sleep delay inhibitor active (persistent)");
     }
   }
 
@@ -168,7 +173,8 @@ Singleton {
       _inhibitProcess.signal(15);
       _inhibitProcess.destroy();
       _inhibitProcess = null;
-      Logger.i("LoginService", "Sleep delay inhibitor released");
+      _inhibitorHolding = false;
+      Logger.i("LoginService", "Sleep delay inhibitor released — suspend may proceed");
     }
   }
 
@@ -176,6 +182,15 @@ Singleton {
     if (_inhibitProcess) {
       _inhibitProcess.destroy();
       _inhibitProcess = null;
+    }
+
+    if (_inhibitorHolding) {
+      // Expected — we released it to allow suspend
+      _inhibitorHolding = false;
+    } else {
+      // Unexpected exit — restart after delay
+      Logger.w("LoginService", "Inhibitor exited unexpectedly (" + exitCode + "), restarting in 5s");
+      inhibitorRestartTimer.start();
     }
   }
 
@@ -250,16 +265,14 @@ Singleton {
       return;
 
     if (sleeping) {
-      // Take the delay inhibitor BEFORE activating lockscreen.
-      // This holds the kernel from actually suspending.
-      _startInhibitor();
+      // The persistent inhibitor is already holding the suspend.
+      // Activate lockscreen, then release inhibitor once confirmed.
+      _inhibitorHolding = true;
 
       if (lockScreen.active && lockScreen.item) {
-        // Already locked and loaded, just release inhibitor
         Logger.i("LoginService", "Screen already locked, releasing inhibitor");
         _releaseInhibitor();
       } else {
-        // Activate lockscreen, then poll until loaded
         Logger.i("LoginService", "Locking screen (inhibitor holding suspend)...");
         lockScreen._lockOnResume = false;
         lockScreen.active = true;
@@ -267,7 +280,7 @@ Singleton {
         lockConfirmTimer.start();
       }
     } else {
-      // Resume: ensure locked, kill grace, restart inhibitor for next cycle
+      // Resume: ensure locked, kill grace, retake inhibitor for next cycle
       if (!lockScreen.active) {
         Logger.i("LoginService", "Locking screen on resume");
         lockScreen._lockOnResume = true;
@@ -276,7 +289,7 @@ Singleton {
         lockScreen.graceAllowed = false;
         lockScreen.lockedAt = 0;
       }
-      _startInhibitor();
+      inhibitorRestartTimer.start();
     }
   }
 
@@ -344,9 +357,20 @@ Singleton {
     }
   }
 
+  Timer {
+    id: inhibitorRestartTimer
+    interval: 5000
+    repeat: false
+    onTriggered: {
+      if (root.available)
+        root._startInhibitor();
+    }
+  }
+
   Component.onDestruction: {
     restartTimer.stop();
     lockConfirmTimer.stop();
+    inhibitorRestartTimer.stop();
     _releaseInhibitor();
     _cleanupMonitor();
   }
