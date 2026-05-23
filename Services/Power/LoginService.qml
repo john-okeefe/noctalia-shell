@@ -22,7 +22,6 @@ Singleton {
   property bool _signalReceived: false
   property int _lockConfirmCount: 0
   property bool _inhibitorHolding: false
-  property int _probePhase: 0
 
   readonly property int _maxRestartAttempts: 3
   readonly property int _maxLockConfirmAttempts: 30
@@ -31,7 +30,6 @@ Singleton {
 
   function init() {
     Logger.i("LoginService", "Probing for logind, dbus-monitor, and inhibit binary...");
-    _probePhase = 1;
     inhibitBinaryProbe.running = true;
   }
 
@@ -49,7 +47,6 @@ Singleton {
           Logger.i("LoginService", "Inhibit binary: " + path);
         else
           Logger.w("LoginService", "No inhibit binary found");
-        root._probePhase = 2;
         logindProbe.running = true;
       }
     }
@@ -68,7 +65,6 @@ Singleton {
           Logger.i("LoginService", "logind found on system bus");
         else
           Logger.w("LoginService", "logind not available on system bus");
-        root._probePhase = 3;
         dbusMonitorProbe.running = true;
       }
     }
